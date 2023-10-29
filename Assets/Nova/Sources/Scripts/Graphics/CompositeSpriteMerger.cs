@@ -10,30 +10,28 @@ namespace Nova
     {
         private const int MergerLayer = 16;
 
-        private readonly List<SpriteRenderer> layers = new List<SpriteRenderer>();
+        private MeshRenderer meshRenderer = null;
+        private MeshFilter meshFilter = null;
 
         public int spriteCount { get; private set; }
 
-        private void EnsureLayers(int count)
+        private void EnsureRenderer(int count)
         {
-            for (int i = layers.Count; i < count; i++)
+            if (!meshRenderer)
             {
-                var go = new GameObject("MergingSprite" + i);
+                var go = new GameObject("MergingSprite");
                 go.transform.SetParent(transform, false);
                 go.layer = MergerLayer;
-                var sr = go.AddComponent<SpriteRenderer>();
-                sr.sortingOrder = i;
-                layers.Add(sr);
+                var mr = go.AddComponent<MeshRenderer>();
+                mr.sharedMaterial = new Material(Shader.Find("Sprites/Merge"));
+                var mf = go.AddComponent<MeshFilter>();
+                mf.mesh = null;
+                go.transform.localScale = new Vector3 (0.01f, 0.01f, 0.01f);
+                meshRenderer = mr;
+                meshFilter = mf;
             }
 
-            for (var i = 0; i < layers.Count; i++)
-            {
-                layers[i].gameObject.SetActive(i < count);
-                if (i >= count)
-                {
-                    layers[i].sprite = null;
-                }
-            }
+            meshRenderer.gameObject.SetActive(0 < count);
 
             spriteCount = count;
         }
@@ -42,33 +40,58 @@ namespace Nova
         {
             if (sprites == null)
             {
-                EnsureLayers(0);
+                EnsureRenderer(0);
                 return;
             }
 
-            EnsureLayers(sprites.Count);
+            EnsureRenderer(sprites.Count);
+            int validSprites = 0;
+            var bounds = GetMergedSize(sprites);
+            if (bounds.size.x > 0 && bounds.size.y > 0)
+            {
+                var mesh = new Mesh();
+                mesh.name = "CompositeSpriteMesh";
+                mesh.vertices = new Vector3[4]
+                {
+                    new Vector3(bounds.xMin, bounds.yMin, 0),
+                    new Vector3(bounds.xMax, bounds.yMin, 0),
+                    new Vector3(bounds.xMax, bounds.yMax, 0),
+                    new Vector3(bounds.xMin, bounds.yMax, 0),
+                };
+                mesh.uv = new Vector2[4]
+                {
+                    new Vector2(0, 0),
+                    new Vector2(1, 0),
+                    new Vector2(1, 1),
+                    new Vector2(0, 1),
+                };
+                mesh.SetIndices(new int[]{0, 1, 2, 0, 2, 3}, MeshTopology.Triangles, 0);
+                meshFilter.mesh = mesh;
+            }
             for (var i = 0; i < sprites.Count; i++)
             {
-                if (sprites[i] != null)
-                {
-                    layers[i].sprite = sprites[i].sprite;
-                    layers[i].transform.localPosition = sprites[i].offset;
-                    layers[i].enabled = true;
-                }
-                else
-                {
-                    layers[i].enabled = false;
-                }
+                var sprite = sprites[i];
+
+                float pixelPerUnit = sprite.sprite.pixelsPerUnit;
+                float scaleX = bounds.size.x / sprite.sprite.texture.width;
+                float scaleY = bounds.size.y / sprite.sprite.texture.height;
+                float offsetX = (sprite.offset.x * pixelPerUnit - sprite.sprite.texture.width /2f - bounds.xMin) / bounds.size.x;
+                float offsetY = (sprite.offset.y * pixelPerUnit - sprite.sprite.texture.height / 2f - bounds.yMin) / bounds.size.y;
+                meshRenderer.sharedMaterial.SetTexture("_MainTex" + validSprites, sprite.sprite.texture);
+                meshRenderer.sharedMaterial.SetVector("_MainTex" + validSprites + "_ST", new Vector4(scaleX, scaleY, -offsetX * scaleX, -offsetY * scaleY));
+
+                validSprites++;
             }
+            meshRenderer.sharedMaterial.EnableKeyword("TEX" + validSprites);
         }
 
         public void SetTextures(CompositeSpriteMerger other)
         {
-            EnsureLayers(other.spriteCount);
-            for (var i = 0; i < other.spriteCount; i++)
+            EnsureRenderer(other.spriteCount);
+            if (other.spriteCount > 0)
             {
-                layers[i].sprite = other.layers[i].sprite;
-                layers[i].transform.localPosition = other.layers[i].transform.localPosition;
+                meshFilter.mesh = other.meshFilter.mesh;
+                meshRenderer.sharedMaterial.CopyPropertiesFromMaterial(other.meshRenderer.sharedMaterial);
             }
         }
 
@@ -86,32 +109,37 @@ namespace Nova
                 return;
             }
 
-            for (var i = 0; i < spriteCount; i++)
+            if (spriteCount > 0)
             {
-                cmd.DrawRenderer(layers[i], layers[i].sharedMaterial);
+                cmd.DrawRenderer(meshRenderer, meshRenderer.sharedMaterial);
             }
         }
 
-        public RenderTexture RenderToTexture(IReadOnlyList<SpriteWithOffset> sprites, Camera renderCamera)
+        public void RenderToTexture(IReadOnlyList<SpriteWithOffset> sprites, Camera renderCamera, Rect bounds,
+            RenderTexture target)
         {
-            // Debug.Log("render to texture");
             SetTextures(sprites);
-            var bounds = GetMergedSize(sprites);
-            var pixelsPerUnit = sprites[0].sprite.pixelsPerUnit;
-            var size = bounds.size * pixelsPerUnit;
-            var renderTexture = new RenderTexture((int)size.x, (int)size.y, 0, RenderTextureFormat.ARGB32);
+            var height = Mathf.Max(bounds.height, bounds.width / target.width * target.height);
 
-            renderCamera.targetTexture = renderTexture;
-            renderCamera.orthographicSize = bounds.size.y / 2 * renderCamera.transform.lossyScale.y;
+            renderCamera.targetTexture = target;
+            renderCamera.orthographicSize = height / 2 * renderCamera.transform.lossyScale.y;
             renderCamera.transform.localPosition = new Vector3(bounds.center.x, bounds.center.y, 0);
 
             renderCamera.Render();
             ClearTextures();
+        }
 
+        public RenderTexture RenderToTexture(IReadOnlyList<SpriteWithOffset> sprites, Camera renderCamera)
+        {
+            var bounds = GetMergedSize(sprites);
+            var size = bounds.size;
+            var renderTexture = new RenderTexture((int)size.x, (int)size.y, 0, RenderTextureFormat.ARGB32);
+
+            RenderToTexture(sprites, renderCamera, bounds, renderTexture);
             return renderTexture;
         }
 
-        private static Rect GetMergedSize(IEnumerable<SpriteWithOffset> spriteList)
+        public static Rect GetMergedSize(IEnumerable<SpriteWithOffset> spriteList)
         {
             var sprites = spriteList.Where(x => x != null).ToList();
             if (!sprites.Any())
@@ -125,12 +153,14 @@ namespace Nova
             var yMax = float.MinValue;
             foreach (var sprite in sprites)
             {
-                var b = sprite.sprite.bounds;
-                var o = sprite.offset;
-                xMin = Mathf.Min(xMin, b.min.x + o.x);
-                yMin = Mathf.Min(yMin, b.min.y + o.y);
-                xMax = Mathf.Max(xMax, b.max.x + o.x);
-                yMax = Mathf.Max(yMax, b.max.y + o.y);
+                var bounds = sprite.sprite.bounds;
+                var pixelsPerUnit = sprite.sprite.pixelsPerUnit;
+                var center = (bounds.center + sprite.offset) * pixelsPerUnit;
+                var extents = bounds.extents * pixelsPerUnit;
+                xMin = Mathf.Min(xMin, center.x - extents.x);
+                yMin = Mathf.Min(yMin, center.y - extents.y);
+                xMax = Mathf.Max(xMax, center.x + extents.x);
+                yMax = Mathf.Max(yMax, center.y + extents.y);
             }
 
             return Rect.MinMaxRect(xMin, yMin, xMax, yMax);
